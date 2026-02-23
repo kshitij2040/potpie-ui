@@ -128,7 +128,7 @@ export function AppSidebar() {
   const maxCredits =
     userSubscription?.plan_type === planTypesEnum.PRO ? 500 : 50;
   const usedCredits = total_human_messages ?? 0;
-  const progress =
+  const creditProgress =
     maxCredits > 0 ? Math.min((usedCredits / maxCredits) * 100, 100) : 0;
 
   const handleTrack = () => {
@@ -284,12 +284,12 @@ export function AppSidebar() {
               </span>
             </div>
             <Progress.Root
-              value={progress}
+              value={creditProgress}
               className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-100 mb-3"
             >
               <Progress.Indicator
                 className="h-full bg-zinc-900 transition-[width] duration-300"
-                style={{ width: `${progress}%` }}
+                style={{ width: `${creditProgress}%` }}
               />
             </Progress.Root>
             <button

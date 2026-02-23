@@ -53,7 +53,24 @@ export function NavUser({
     // @ts-ignore
     if (window.Plain) {
       // @ts-ignore
-      window.Plain.open?.();
+      if (window.Plain.isInitialized && window.Plain.isInitialized()) {
+        // @ts-ignore
+        window.Plain.open();
+      } else {
+        console.log("Plain chat not yet initialized, waiting...");
+        // Wait a bit and try again
+        setTimeout(() => {
+          // @ts-ignore
+          if (window.Plain && window.Plain.isInitialized && window.Plain.isInitialized()) {
+            // @ts-ignore
+            window.Plain.open();
+          } else {
+            toast.error("Chat is still loading. Please try again in a moment.");
+          }
+        }, 1000);
+      }
+    } else {
+      toast.error("Chat is not available. Please refresh the page.");
     }
   };
 

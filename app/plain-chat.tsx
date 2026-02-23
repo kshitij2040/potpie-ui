@@ -53,11 +53,14 @@ export default function PlainChatProvider() {
             script.onload = function () {
                 // @ts-ignore
                 if (window.Plain) {
-                    // @ts-ignore
-                    window.Plain.init({
-                        appId: "liveChatApp_01KHRDQSB5WJHKCW4ZE3GFH7K5",
+                    const initOptions: any = {
+                        appId: "liveChatApp_01KJ4XEK8AH7H777N4V3692S1M",
                         hideLauncher: true,
                         theme: 'light',
+                        requireAuthentication: true,
+                        entryPoint: {
+                            type: 'default',
+                        },
                         links: [
                             {
                                 icon: 'book',
@@ -75,7 +78,11 @@ export default function PlainChatProvider() {
                                 url: 'https://discord.gg/ryk5CMD5v6',
                             },
                         ],
-                    });
+                    };
+
+                    // @ts-ignore
+                    window.Plain.init(initOptions);
+                    console.log("Plain chat initialized with requireAuthentication");
                 }
             };
             script.src = "https://chat.cdn-plain.com/index.js";
