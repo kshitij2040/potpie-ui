@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo, startTransition } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
   Play,
@@ -37,11 +37,15 @@ import {
   Info,
   RefreshCw,
   SendHorizonal,
-  FolderTree,
   Wrench,
+  AlertCircle,
+  Download,
 } from "lucide-react";
-import { useSelector } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
+import { AppDispatch } from "@/lib/state/store";
 import { RootState } from "@/lib/state/store";
+import { setRepoAndBranchForTask } from "@/lib/state/Reducers/RepoAndBranch";
+import JSZip from "jszip";
 import TaskSplittingService from "@/services/TaskSplittingService";
 import PlanService from "@/services/PlanService";
 import SpecService from "@/services/SpecService";
@@ -53,6 +57,7 @@ import {
   TaskSplittingStatusResponse,
   TaskSplittingItemsResponse,
   TaskLayer,
+  TaskItem,
   PlanItem,
 } from "@/lib/types/spec";
 import { getStreamEventPayload } from "@/lib/utils";
@@ -214,6 +219,57 @@ function getAllNodeIds(nodes: TreeNode[]): string[] {
   return ids;
 }
 
+/**
+ * Merge newly fetched layers into previous state, reusing object references for
+ * unchanged layers/tasks. Reduces re-renders when codegen completes by avoiding
+ * a full tree replace (which causes a visible "refresh").
+ */
+function mergeLayersForCompletion(
+  prev: TaskLayer[],
+  next: TaskLayer[]
+): TaskLayer[] {
+  if (prev.length !== next.length) return next;
+  let usedPrev = true;
+  const merged: TaskLayer[] = [];
+  for (let i = 0; i < prev.length; i++) {
+    const pLayer = prev[i];
+    const nLayer = next[i];
+    if (
+      !pLayer ||
+      !nLayer ||
+      pLayer.id !== nLayer.id ||
+      (pLayer.tasks?.length ?? 0) !== (nLayer.tasks?.length ?? 0)
+    ) {
+      merged.push(nLayer);
+      usedPrev = false;
+      continue;
+    }
+    const mergedTasks: TaskItem[] = [];
+    const tasks = nLayer.tasks ?? [];
+    for (let t = 0; t < tasks.length; t++) {
+      const pTask = pLayer.tasks?.[t];
+      const nTask = tasks[t];
+      const taskUnchanged =
+        pTask &&
+        pTask.id === nTask.id &&
+        pTask.status === nTask.status &&
+        (pTask.changes?.length ?? 0) === (nTask.changes?.length ?? 0);
+      mergedTasks.push(taskUnchanged ? pTask : nTask);
+      if (!taskUnchanged) usedPrev = false;
+    }
+    const layerUnchanged =
+      pLayer.status === nLayer.status &&
+      mergedTasks.every((t, idx) => t === pLayer.tasks?.[idx]);
+    if (layerUnchanged) {
+      merged.push(pLayer);
+    } else {
+      merged.push({ ...pLayer, status: nLayer.status, tasks: mergedTasks });
+      usedPrev = false;
+    }
+  }
+  return usedPrev ? prev : merged;
+}
+
 // --- Sub-components ---
 
 const StatusBadge = ({ status, tests }: { status: string; tests: any }) => {
@@ -269,16 +325,9 @@ const CodeFileCard = ({
         onClick={() => setIsExpanded(!isExpanded)}
         className="w-full px-4 py-3 bg-[#F5F5F5] border-b border-gray-200 flex items-center justify-between gap-3 hover:bg-[#EEEEEE] transition-colors"
       >
-        <div className="flex items-center gap-2">
-          <ChevronDown
-            className={`w-4 h-4 text-zinc-500 transition-transform duration-200 ${
-              isExpanded ? "" : "-rotate-90"
-            }`}
-          />
-          <span className="text-xs font-medium text-[#022019] truncate">
-            {change.path}
-          </span>
-        </div>
+        <span className="text-xs font-medium text-[#022019] truncate">
+          {change.path}
+        </span>
       </button>
       {isExpanded && (
         <div className="min-h-[280px]">
@@ -548,7 +597,7 @@ const TaskCard = ({
                       idx: number
                     ) => (
                       <div
-                        key={idx}
+                        key={change.path ?? idx}
                         className="bg-background rounded-lg border border-zinc-200 overflow-hidden shadow-sm animate-in fade-in slide-in-from-bottom-2 duration-300"
                         style={{ animationDelay: `${idx * 100}ms` }}
                       >
@@ -710,11 +759,16 @@ export default function VerticalTaskExecution() {
   const params = useParams();
   const router = useRouter();
   const searchParams = useSearchParams();
+  const dispatch = useDispatch<AppDispatch>();
   // Note: taskId in URL is actually recipeId now
   const recipeId = params?.taskId as string;
   const planIdFromUrl = searchParams.get("planId");
   const itemNumberFromUrl = searchParams.get("itemNumber");
   const taskSplittingIdFromUrl = searchParams.get("taskSplittingId");
+  const repoNameFromUrl = searchParams.get("repoName");
+
+  const repoBranchByTask = useSelector((state: RootState) => state.RepoAndBranch.byTaskId);
+  const storedRepoContext = recipeId ? repoBranchByTask?.[recipeId] : undefined;
 
   const [activeSliceId, setActiveSliceId] = useState(
     itemNumberFromUrl ? parseInt(itemNumberFromUrl) : 1
@@ -874,6 +928,48 @@ export default function VerticalTaskExecution() {
     return map;
   }, [allLayers]);
 
+  // Download generated code as a zip (all changed files from layers)
+  const handleDownloadCode = useCallback(async () => {
+    const files: { path: string; content: string }[] = [];
+    const seen = new Set<string>();
+    for (const layer of allLayers) {
+      for (const task of layer.tasks ?? []) {
+        for (const change of task.changes ?? []) {
+          const path = change.path?.trim();
+          if (!path || seen.has(path)) continue;
+          seen.add(path);
+          files.push({ path, content: change.content ?? "" });
+        }
+      }
+    }
+    if (files.length === 0) {
+      toast.error("No generated code to download.");
+      return;
+    }
+    try {
+      const zip = new JSZip();
+      for (const { path, content } of files) {
+        zip.file(path, content);
+      }
+      const blob = await zip.generateAsync({ type: "blob" });
+      const name = `codegen-${taskSplittingId ?? "export"}-${Date.now()}.zip`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      try {
+        a.click();
+      } finally {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+      toast.success(`Downloaded ${files.length} file(s) as ${name}`);
+    } catch (err) {
+      toast.error("Failed to create download.");
+    }
+  }, [allLayers, taskSplittingId]);
+
   // Fetch recipe details (prompt + repo/branch) for the left header.
   // Only fetch once per recipeId to avoid re-renders on page refresh.
   useEffect(() => {
@@ -902,8 +998,13 @@ export default function VerticalTaskExecution() {
         const prompt = (details.user_prompt || "").trim();
         setRecipePrompt(prompt);
         setProjectId(details.project_id?.trim() || null);
-        setRepoName(details.repo_name?.trim() || fromStorage?.repo_name?.trim() || "Unknown Repository");
-        setBranchName(details.branch_name?.trim() || fromStorage?.branch_name?.trim() || "main");
+        const repo = details.repo_name?.trim() || fromStorage?.repo_name?.trim() || null;
+        const branch = details.branch_name?.trim() || fromStorage?.branch_name?.trim() || "main";
+        setRepoName(repo || "Unknown Repository");
+        setBranchName(branch);
+        if (repo && typeof window !== "undefined" && !new URLSearchParams(window.location.search).get("repoName")?.trim()) {
+          dispatch(setRepoAndBranchForTask({ taskId: recipeId, repoName: repo, branchName: branch }));
+        }
       } catch (e) {
         if (!mounted) return;
         setRecipePrompt(fromStorage?.user_prompt || "");
@@ -915,7 +1016,12 @@ export default function VerticalTaskExecution() {
     return () => {
       mounted = false;
     };
-  }, [recipeId]);
+  }, [recipeId, dispatch]);
+
+  // Prefer URL/Redux for repo/branch so we don't show "Unknown Repository" when API is empty or wrong
+  const displayRepoName =
+    repoNameFromUrl || storedRepoContext?.repoName || repoName;
+  const displayBranchName = storedRepoContext?.branchName || branchName;
 
   // Initialize the left "chat" with the prompt + a codegen helper message (once per recipe).
   // Run once per recipeId; use fallback prompt if recipePrompt not loaded yet so the pane is never empty.
@@ -930,7 +1036,7 @@ export default function VerticalTaskExecution() {
       {
         role: "assistant",
         content:
-          "Your implementation plan is ready. Review the tasks below and tell me what you'd like to change—we'll get it right before we start building.",
+          "Your code generation setup is complete. Check the implementation below.",
       },
     ]);
   }, [recipeId, recipePrompt]);
@@ -971,8 +1077,8 @@ export default function VerticalTaskExecution() {
             projectId || null,
             agentId,
             true, // hidden
-            repoName !== "Unknown Repository" ? repoName : undefined,
-            branchName !== "main" ? branchName : undefined
+            displayRepoName !== "Unknown Repository" ? displayRepoName : undefined,
+            displayBranchName !== "main" ? displayBranchName : undefined
           );
           conversationId = res?.conversation_id ?? null;
           if (conversationId && typeof window !== "undefined") {
@@ -1030,7 +1136,7 @@ export default function VerticalTaskExecution() {
     return () => {
       mounted = false;
     };
-  }, [recipeId, user?.uid, projectId, repoName, branchName, recipePrompt]);
+  }, [recipeId, user?.uid, projectId, displayRepoName, displayBranchName, recipePrompt]);
 
   useEffect(() => {
     if (chatEndRef.current) {
@@ -1390,45 +1496,43 @@ export default function VerticalTaskExecution() {
 
         if (!mounted) return [];
 
-        // Only update if layers actually changed - use efficient comparison
-        setAllLayers((prev) => {
-          // Quick length check first
-          if (prev.length !== allLayersData.length) return allLayersData;
-          
-          // Compare by checking task statuses and changes (avoids full JSON.stringify)
-          const hasChanged = allLayersData.some((layer, idx) => {
-            const prevLayer = prev[idx];
-            if (!prevLayer) return true;
-            if (layer.status !== prevLayer.status) return true;
-            if (layer.tasks?.length !== prevLayer.tasks?.length) return true;
-            // Check if any task status or changes changed
-            return layer.tasks?.some((task, tIdx) => {
-              const prevTask = prevLayer.tasks?.[tIdx];
-              if (!prevTask) return true;
-              if (task.status !== prevTask.status) return true;
-              // Also check if changes were added (task completed)
-              const hasNewChanges = (task.changes?.length ?? 0) !== (prevTask.changes?.length ?? 0);
-              return hasNewChanges;
-            });
-          });
-          
-          return hasChanged ? allLayersData : prev;
-        });
-        setNextLayerOrder(null);
+        // Apply layer updates in a transition to avoid a visible "refresh" when codegen completes
+        startTransition(() => {
+          // Only update if layers actually changed - use merge to preserve refs
+          setAllLayers((prev) => {
+            if (prev.length !== allLayersData.length) return allLayersData;
 
-        // Update current DAG only when layers are newly added (not on every status change)
-        if (allLayersData.length > 0) {
-          setCurrentDag((prev) => {
-            // Only update DAG when new layers are added, not when existing ones change status
-            if (prev.length < allLayersData.length) {
-              return allLayersData;
-            }
-            return prev; // Keep existing DAG to avoid re-renders
+            const hasChanged = allLayersData.some((layer, idx) => {
+              const prevLayer = prev[idx];
+              if (!prevLayer) return true;
+              if (layer.status !== prevLayer.status) return true;
+              if (layer.tasks?.length !== prevLayer.tasks?.length) return true;
+              return layer.tasks?.some((task, tIdx) => {
+                const prevTask = prevLayer.tasks?.[tIdx];
+                if (!prevTask) return true;
+                if (task.status !== prevTask.status) return true;
+                return (
+                  (task.changes?.length ?? 0) !== (prevTask.changes?.length ?? 0)
+                );
+              });
+            });
+
+            return hasChanged
+              ? mergeLayersForCompletion(prev, allLayersData)
+              : prev;
           });
-          setGraphLoadIndex((prev) =>
-            prev < allLayersData.length ? allLayersData.length : prev
-          );
-        }
+          setNextLayerOrder(null);
+
+          if (allLayersData.length > 0) {
+            setCurrentDag((prev) => {
+              if (prev.length < allLayersData.length) return allLayersData;
+              return prev;
+            });
+            setGraphLoadIndex((prev) =>
+              prev < allLayersData.length ? allLayersData.length : prev
+            );
+          }
+        });
         return allLayersData;
       } catch (error) {
         console.error("[Code Page] Error fetching layers:", error);
@@ -1998,8 +2102,8 @@ export default function VerticalTaskExecution() {
               {(recipePrompt?.length ?? 0) > 50 ? "…" : ""}
             </h1>
             <div className="flex items-center gap-2 shrink-0">
-              <Badge icon={Github}>{repoName}</Badge>
-              <Badge icon={GitBranch}>{branchName}</Badge>
+              <Badge icon={Github}>{displayRepoName}</Badge>
+              <Badge icon={GitBranch}>{displayBranchName}</Badge>
         </div>
       </div>
 
@@ -2262,14 +2366,19 @@ export default function VerticalTaskExecution() {
                     handleSendChatMessage();
                   }
                 }}
-                placeholder="Describe any change that you want...."
+                placeholder={
+                  taskSplittingStatus?.codegen_status === "IN_PROGRESS"
+                    ? "Code generation in progress..."
+                    : "Ask about the code or request changes..."
+                }
                 rows={3}
-                className="w-full min-h-[88px] px-4 py-3 pr-14 pb-12 rounded-xl border border-gray-200 bg-[#FFFDFC] text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#102C2C]/20 focus:border-[#102C2C] resize-none"
+                disabled={taskSplittingStatus?.codegen_status === "IN_PROGRESS"}
+                className="w-full min-h-[88px] px-4 py-3 pr-14 pb-12 rounded-xl border border-gray-200 bg-[#FFFDFC] text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#102C2C]/20 focus:border-[#102C2C] resize-none disabled:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed"
               />
               <button
                 type="button"
                 onClick={handleSendChatMessage}
-                disabled={isChatStreaming || !codegenConversationId}
+                disabled={isChatStreaming || !codegenConversationId || taskSplittingStatus?.codegen_status === "IN_PROGRESS"}
                 className="absolute right-2 bottom-4 h-10 w-10 rounded-full bg-[#102C2C] text-[#B6E343] flex items-center justify-center hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isChatStreaming ? (
@@ -2302,7 +2411,7 @@ export default function VerticalTaskExecution() {
               </div>
 
                 <div className="flex items-center gap-4">
-                {/* Changed files (slider with tree + diff) — before MAKE PR */}
+                {/* View files (slider with tree + diff) */}
                 {taskSplittingId && (
                   <button
                     type="button"
@@ -2311,67 +2420,26 @@ export default function VerticalTaskExecution() {
                       setChangedFilesSliderOpen(true);
                     }}
                     className="shrink-0 px-4 py-2 rounded-lg font-semibold text-xs flex items-center gap-2 border border-[#D3E5E5] bg-white text-[#022019] hover:bg-[#F5F5F5] transition-colors"
-                    title="View all changed files and diffs"
+                    title="View all files and diffs"
                   >
-                    <FolderTree className="w-3.5 h-3.5" />
-                    Changed files
+                    View files
                   </button>
                 )}
 
-                {/* MAKE PR / VIEW PR */}
-                {taskSplittingStatus?.pr_url ? (
-                  <a
-                    href={taskSplittingStatus.pr_url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="shrink-0 px-5 py-2 rounded-lg font-semibold text-xs bg-[#022019] text-[#B4D13F] hover:opacity-90"
-                  >
-                    VIEW PR
-                  </a>
-                ) : (
-                  <button
-                    type="button"
-                    disabled={
-                      !taskSplittingId ||
-                      !taskSplittingStatus ||
-                      taskSplittingStatus.codegen_status !== "COMPLETED" ||
-                      isCreatingPR ||
-                      taskSplittingStatus.pr_status === "IN_PROGRESS"
-                    }
-                    onClick={async () => {
-                      if (!taskSplittingId) return;
-                      try {
-                        setIsCreatingPR(true);
-                        await TaskSplittingService.createPullRequest(taskSplittingId);
-                        toast.success("PR creation started", { title: "Success" });
-                      } catch (e: any) {
-                        setIsCreatingPR(false);
-                        toast.error(e?.message || "Failed to start PR creation", { title: "Error" });
-                      }
-                    }}
-                    className="shrink-0 px-5 py-2 rounded-lg font-semibold text-xs flex items-center gap-2 bg-[#022019] text-[#B4D13F] hover:opacity-90 disabled:bg-zinc-100 disabled:text-zinc-400 disabled:hover:opacity-100 disabled:cursor-not-allowed"
-                    title={
-                      !taskSplittingId
-                        ? "Start code generation before creating a PR"
-                        : taskSplittingStatus?.codegen_status !== "COMPLETED"
-                          ? "Finish code generation before creating a PR"
-                          : taskSplittingStatus?.pr_status === "FAILED"
-                            ? taskSplittingStatus?.pr_error_message || "PR creation failed"
-                            : taskSplittingStatus?.pr_status === "IN_PROGRESS"
-                              ? "PR creation is in progress"
-                              : "Create a PR from completed changes"
-                    }
-                  >
-                    {isCreatingPR || taskSplittingStatus?.pr_status === "IN_PROGRESS" ? (
-                      <>
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        MAKING PR…
-                      </>
-                    ) : (
-                      "MAKE PR"
-                    )}
-                  </button>
-                )}
+                {/* Download generated code (zip) — when codegen completed and no PR yet */}
+                {taskSplittingId &&
+                  taskSplittingStatus?.codegen_status === "COMPLETED" &&
+                  !taskSplittingStatus?.pr_url && (
+                    <button
+                      type="button"
+                      onClick={handleDownloadCode}
+                      className="shrink-0 px-4 py-2 rounded-lg font-semibold text-xs flex items-center gap-2 border border-[#D3E5E5] bg-white text-[#022019] hover:bg-[#F5F5F5] transition-colors"
+                      title="Download generated code as zip"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Download code
+                    </button>
+                  )}
             </div>
           </div>
                 </div>
@@ -2426,11 +2494,29 @@ export default function VerticalTaskExecution() {
                                 }}
                               />
                             ))
+                          ) : selectedTask.status === "FAILED" ? (
+                            <div className="rounded-lg border border-red-200 bg-red-50 p-8 text-center">
+                              <AlertCircle className="w-6 h-6 text-red-600 mx-auto mb-2" />
+                              <p className="text-sm text-red-700">Task failed</p>
+                              {(selectedTask as any).error && (
+                                <p className="text-xs text-red-600 mt-1">{(selectedTask as any).error}</p>
+                              )}
+                            </div>
+                          ) : selectedTask.status === "COMPLETED" ? (
+                            <div className="rounded-lg border border-gray-200 bg-white p-8 text-center">
+                              <Check className="w-6 h-6 text-green-500 mx-auto mb-2" />
+                              <p className="text-sm text-zinc-600">Task completed with no file changes</p>
+                            </div>
+                          ) : selectedTask.status === "IN_PROGRESS" ? (
+                            <div className="rounded-lg border border-gray-200 bg-white p-8 text-center">
+                              <img src="/images/loader.gif" alt="Loading" className="w-12 h-12 mx-auto mb-2" />
+                              <p className="text-sm text-zinc-600">Generating code...</p>
+                            </div>
                           ) : (
                             <div className="rounded-lg border border-gray-200 bg-white p-8 text-center">
-                              <Loader2 className="w-6 h-6 animate-spin text-[#022D2C] mx-auto mb-2" />
-                              <p className="text-sm text-zinc-600">Generating code...</p>
-                          </div>
+                              <Circle className="w-6 h-6 text-zinc-300 mx-auto mb-2" />
+                              <p className="text-sm text-zinc-600">Waiting to start...</p>
+                            </div>
                           )}
                         </>
                       );
@@ -2490,20 +2576,92 @@ export default function VerticalTaskExecution() {
                 })()}
               </div>
           </div>
+
+            {/* Sticky MAKE PR / VIEW PR at end of code gen panel */}
+            {taskSplittingId && (
+              <div className="sticky bottom-0 shrink-0 border-t border-[#D3E5E5] bg-white px-6 py-4 flex justify-end">
+                {taskSplittingStatus?.pr_url ? (
+                  <a
+                    href={taskSplittingStatus.pr_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="shrink-0 px-5 py-2.5 rounded-lg font-semibold text-xs bg-[#022019] text-[#B4D13F] hover:opacity-90"
+                  >
+                    VIEW PR
+                  </a>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={
+                      !taskSplittingId ||
+                      !taskSplittingStatus ||
+                      taskSplittingStatus.codegen_status !== "COMPLETED" ||
+                      isCreatingPR ||
+                      taskSplittingStatus.pr_status === "IN_PROGRESS"
+                    }
+                    onClick={async () => {
+                      if (!taskSplittingId) return;
+                      toast.dismiss();
+                      try {
+                        setIsCreatingPR(true);
+                        await TaskSplittingService.createPullRequest(taskSplittingId);
+                        toast.success("PR creation started", { title: "Success" });
+                      } catch (e: any) {
+                        setIsCreatingPR(false);
+                        const msg = e?.message ?? "Failed to start PR creation";
+                        const isAppNotInstalled =
+                          typeof msg === "string" &&
+                          (msg.includes("not installed") ||
+                            msg.includes("GitHub App") ||
+                            msg.includes("404"));
+                        if (isAppNotInstalled) {
+                          toast.error(
+                            "Cannot create PR since Potpie app is not installed on this repository. You can download the generated code below.",
+                            { title: "PR not available", duration: 8000 }
+                          );
+                        } else {
+                          toast.error(msg, { title: "Error" });
+                        }
+                      }
+                    }}
+                    className="shrink-0 px-5 py-2.5 rounded-lg font-semibold text-xs flex items-center gap-2 bg-[#022019] text-[#B4D13F] hover:opacity-90 disabled:bg-zinc-100 disabled:text-zinc-400 disabled:hover:opacity-100 disabled:cursor-not-allowed"
+                    title={
+                      !taskSplittingId
+                        ? "Start code generation before creating a PR"
+                        : taskSplittingStatus?.codegen_status !== "COMPLETED"
+                          ? "Finish code generation before creating a PR"
+                          : taskSplittingStatus?.pr_status === "FAILED"
+                            ? taskSplittingStatus?.pr_error_message || "PR creation failed"
+                            : taskSplittingStatus?.pr_status === "IN_PROGRESS"
+                              ? "PR creation is in progress"
+                              : "Create a PR from completed changes"
+                    }
+                  >
+                    {isCreatingPR || taskSplittingStatus?.pr_status === "IN_PROGRESS" ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        MAKING PR…
+                      </>
+                    ) : (
+                      "MAKE PR"
+                    )}
+                  </button>
+                )}
+              </div>
+            )}
           </aside>
                 </div>
               </div>
 
-      {/* Changed files slider: tree + file diff */}
+      {/* View files slider: tree + file diff */}
       <Sheet open={changedFilesSliderOpen} onOpenChange={setChangedFilesSliderOpen}>
         <SheetContent
           side="right"
           className="w-full max-w-[90vw] sm:max-w-6xl flex flex-col gap-0 p-0 overflow-hidden bg-white"
         >
           <SheetHeader className="px-6 py-4 shrink-0 border-b border-[#E5E7EB]">
-            <SheetTitle className="text-base font-semibold text-[#022019] flex items-center gap-2">
-              <FolderTree className="w-4 h-4" />
-              Changed files
+            <SheetTitle className="text-base font-semibold text-[#022019]">
+              View files
             </SheetTitle>
           </SheetHeader>
           <div className="flex-1 flex min-h-0 overflow-hidden">
@@ -2531,7 +2689,7 @@ export default function VerticalTaskExecution() {
               ) : (
                 <div className="flex flex-col items-center justify-center py-12 px-4 text-center text-zinc-500">
                   <FileText className="w-10 h-10 mb-3 opacity-50" />
-                  <p className="text-sm font-medium">No changed files yet</p>
+                  <p className="text-sm font-medium">No files yet</p>
                   <p className="text-xs mt-1">Files will appear here as code generation runs</p>
                 </div>
               )}

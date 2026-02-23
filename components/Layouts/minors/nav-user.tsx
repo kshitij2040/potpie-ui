@@ -9,6 +9,8 @@ import {
   AlertCircle,
   Mail,
   MessageCircle,
+  Settings,
+  SubscriptIcon,
 } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -170,6 +172,13 @@ export function NavUser({
               >
                 <Receipt />
                 Manage Subscription
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="hover:bg-[#F5F0EB] cursor-pointer"
+                onClick={() => router.push("/settings")}
+              >
+                <Settings />
+                Settings
               </DropdownMenuItem>
               <DropdownMenuItem
                 className="hover:bg-[#F5F0EB] cursor-pointer"

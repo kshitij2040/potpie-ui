@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback, startTransition } from "react";
 import Image from "next/image";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { toast } from "@/components/ui/sonner";
@@ -177,6 +177,11 @@ export default function QnaPage() {
     const fetchRecipeDetails = async () => {
       if (!recipeId) return;
 
+      const repoFromUrl =
+        typeof window !== "undefined"
+          ? new URLSearchParams(window.location.search).get("repoName")
+          : null;
+
       let fromStorage: { repo_name?: string; branch_name?: string } | null = null;
       if (typeof window !== "undefined") {
         try {
@@ -218,11 +223,14 @@ export default function QnaPage() {
           recipeDetails.branch_name?.trim() ||
           fromStorage?.branch_name?.trim() ||
           null;
-        setRecipeRepoName(repo);
-        setRecipeBranchName(branch ?? "main");
-        
-        // Dispatch to Redux so it persists across navigation (same as spec page)
-        if (repo) {
+        startTransition(() => {
+          setRecipeRepoName(repo);
+          setRecipeBranchName(branch ?? "main");
+        });
+
+        // Don't overwrite Redux when user navigated with ?repoName= (explicit selection);
+        // backend can return a different repo and would replace the user's choice.
+        if (repo && !repoFromUrl?.trim()) {
           dispatch(
             setRepoAndBranchForTask({
               taskId: recipeId,
@@ -234,12 +242,14 @@ export default function QnaPage() {
       } catch (error: any) {
         console.error("[QnA Page] Failed to fetch recipe details:", error);
         // On error, use localStorage so repo/branch can still show (same as spec)
-        setRecipeRepoName(
-          fromStorage?.repo_name?.trim() || null
-        );
-        setRecipeBranchName(
-          fromStorage?.branch_name?.trim() || "main"
-        );
+        startTransition(() => {
+          setRecipeRepoName(
+            fromStorage?.repo_name?.trim() || null
+          );
+          setRecipeBranchName(
+            fromStorage?.branch_name?.trim() || "main"
+          );
+        });
       }
     };
 
@@ -604,14 +614,8 @@ export default function QnaPage() {
     const maxAttempts = 60;
 
     const fetchQuestions = async () => {
-      setQuestionsPolling(true);
-      setState((prev) => ({
-        ...prev,
-        pageState: "generating",
-        questionGenerationStatus: null,
-        questionGenerationError: null,
-      }));
-
+      // Avoid redundant setState on start: pageState is already "generating" from initial state.
+      // Setting questionsPolling(true) here caused a re-render flicker; we set it only when polling.
       try {
         // Same as plan: try GET first; if backend includes run_id, add to URL so stream connects (no POST needed)
         let questionsData: RecipeQuestionsResponse;
@@ -750,6 +754,7 @@ export default function QnaPage() {
         }
 
         let attempts = 0;
+        setQuestionsPolling(true); // Show polling state only when we actually poll
         while (attempts < maxAttempts) {
           await new Promise((r) => setTimeout(r, pollInterval));
           attempts++;
@@ -864,17 +869,17 @@ export default function QnaPage() {
     enabled: !!projectId,
   });
 
-  // Same as spec: Redux first (set by newchat), then recipe details, URL, project data, fallback
+  // Prefer URL param (user's explicit selection from newchat) so it's not overwritten by backend/Redux
   const repoName =
+    repoNameFromUrl ||
     storedRepoContext?.repoName ||
     recipeRepoName ||
-    repoNameFromUrl ||
     projectData?.repo_name ||
     "Unknown Repository";
   const branchName =
     storedRepoContext?.branchName ||
-    recipeBranchName || 
-    projectData?.branch_name || 
+    recipeBranchName ||
+    projectData?.branch_name ||
     "main";
 
   // Parse feature idea from properties if not in URL
@@ -1513,12 +1518,14 @@ export default function QnaPage() {
   }).length;
 
   // Drive thinking stream UI from parsing + question status (same layout as spec)
+  // Include pageState so generating UI shows from first frame (avoids flicker before fetch starts)
   const questionsCount = state.questions.length;
   const isGenerating =
     isStreamingActive ||
     (parsingStatus && parsingStatus !== ParsingStatusEnum.READY && parsingStatus !== ParsingStatusEnum.ERROR) ||
     questionsLoading ||
-    (questionsPolling && questionsCount === 0);
+    (questionsPolling && questionsCount === 0) ||
+    (state.pageState === "generating" && questionsCount === 0);
 
   const {
     streamProgress: derivedProgress,
@@ -1543,7 +1550,10 @@ export default function QnaPage() {
     }
 
     const qStatus = state.questionGenerationStatus;
-    const qLoading = questionsLoading || (questionsPolling && questionsCount === 0);
+    const qLoading =
+      questionsLoading ||
+      (questionsPolling && questionsCount === 0) ||
+      (state.pageState === "generating" && questionsCount === 0);
     if (qLoading) {
       const msg =
         qStatus === "pending"
@@ -1618,6 +1628,7 @@ export default function QnaPage() {
     questionsLoading,
     questionsPolling,
     questionsCount,
+    state.pageState,
     state.questionGenerationStatus,
     state.questions.length,
   ]);
@@ -1731,26 +1742,24 @@ export default function QnaPage() {
     <div className="h-screen flex flex-col overflow-hidden bg-background text-primary-color font-sans antialiased">
       <div className="flex-1 flex min-h-0 overflow-hidden">
         {/* Left: questions area — same structure as spec chat */}
+        {/* Full width when no questions, half width when questions ready */}
         <div
-          className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden"
+          className={`flex flex-col min-w-0 min-h-0 overflow-hidden transition-all duration-300 ${hasQuestionsReady ? 'flex-1' : 'w-full'}`}
           style={{ backgroundColor: "#FAF8F7" }}
         >
-          {/* Chat-style header: title + repo/branch (always visible, including before questions generated) */}
-          <div className="flex justify-between items-center px-6 pt-6 pb-4 shrink-0 gap-2">
+          {/* Title on left side */}
+          <div className="shrink-0 px-6 pt-6 pb-4">
             <h1 className="text-lg font-bold text-primary-color truncate capitalize min-w-0">
               {featureIdea?.slice(0, 50) || "Clarifying Questions"}
               {(featureIdea?.length ?? 0) > 50 ? "…" : ""}
             </h1>
-            <div className="flex items-center gap-2 shrink-0">
-              {repoName && repoName !== "Unknown Repository" && (
-                <Badge icon={Github}>{repoName}</Badge>
-              )}
-              {branchName && <Badge icon={GitBranch}>{branchName}</Badge>}
-            </div>
           </div>
           <div
             className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-6 py-4 space-y-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
             style={{ msOverflowStyle: "none" }}
+            onMouseLeave={() =>
+              setState((prev) => ({ ...prev, hoveredQuestion: null }))
+            }
           >
             {/* Chat UI like spec: user message + assistant intro + Thinking block */}
             {/* User message (feature idea) */}
@@ -1796,7 +1805,7 @@ export default function QnaPage() {
             )}
 
             {/* Align with Thinking block content above (52px = avatar width + margin) */}
-            <div className="max-w-3xl w-full space-y-6 ml-[52px]">
+            <div className="space-y-6 ml-[52px] min-w-0" style={{ width: "calc(100% - 52px)" }}>
             {/* Show error card when there's an error - full card when no questions, banner when questions exist */}
             {state.pageState === "questions" && state.questionGenerationError && (
               state.questions.length === 0 ? (
@@ -1865,17 +1874,20 @@ export default function QnaPage() {
           </div>
         </div>
 
-        {/* Right: question list — half-and-half like spec */}
-        {state.pageState === "questions" && questionsInOrder.length > 0 && (
+        {/* Right: question list — only show when questions are ready */}
+        {hasQuestionsReady && (
           <div
             className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden"
             style={{ backgroundColor: "#FAF8F7" }}
           >
-            <aside className="h-full w-full min-w-[280px] flex flex-col overflow-hidden min-h-0">
-              <div className="px-10 py-3 flex items-center gap-2 flex-wrap shrink-0 justify-end">
-                {repoName && <Badge icon={Github}>{repoName}</Badge>}
-                {branchName && <Badge icon={GitBranch}>{branchName}</Badge>}
-              </div>
+            {/* Repo/branch badges on right side */}
+            <div className="flex justify-end items-center px-6 pt-6 pb-4 shrink-0 gap-2">
+              {repoName && repoName !== "Unknown Repository" && (
+                <Badge icon={Github}>{repoName}</Badge>
+              )}
+              {branchName && <Badge icon={GitBranch}>{branchName}</Badge>}
+            </div>
+            <aside className="flex-1 min-h-0 w-full min-w-[280px] flex flex-col overflow-hidden">
               <div className="flex-1 overflow-y-auto min-h-0 py-3 pl-6 pr-8">
                 <h2 className="text-sm font-bold mb-2 text-left text-primary-color">
                   Clarifying Questions
