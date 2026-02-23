@@ -2366,14 +2366,19 @@ export default function VerticalTaskExecution() {
                     handleSendChatMessage();
                   }
                 }}
-                placeholder="Ask about the code or request changes..."
+                placeholder={
+                  taskSplittingStatus?.codegen_status === "IN_PROGRESS"
+                    ? "Code generation in progress..."
+                    : "Ask about the code or request changes..."
+                }
                 rows={3}
-                className="w-full min-h-[88px] px-4 py-3 pr-14 pb-12 rounded-xl border border-gray-200 bg-[#FFFDFC] text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#102C2C]/20 focus:border-[#102C2C] resize-none"
+                disabled={taskSplittingStatus?.codegen_status === "IN_PROGRESS"}
+                className="w-full min-h-[88px] px-4 py-3 pr-14 pb-12 rounded-xl border border-gray-200 bg-[#FFFDFC] text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#102C2C]/20 focus:border-[#102C2C] resize-none disabled:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed"
               />
               <button
                 type="button"
                 onClick={handleSendChatMessage}
-                disabled={isChatStreaming || !codegenConversationId}
+                disabled={isChatStreaming || !codegenConversationId || taskSplittingStatus?.codegen_status === "IN_PROGRESS"}
                 className="absolute right-2 bottom-4 h-10 w-10 rounded-full bg-[#102C2C] text-[#B6E343] flex items-center justify-center hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isChatStreaming ? (
