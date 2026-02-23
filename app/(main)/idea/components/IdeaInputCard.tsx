@@ -163,15 +163,12 @@ export default function IdeaInputCard({
     provider: string;
   } | null>({ id: "", name: "glm 4.7", provider: "z.ai" });
   const [modelList, setModelList] = useState<Model[]>([]);
-  /** Pro users can use all models; free users only GLM (no upgrade flag, selectable). */
+  /** Pro users: all models. Free users: all except OpenAI, Anthropic, Gemini (those show upgrade flag). */
   const isModelAvailable = (model: Model) => {
     if (!isFreeUser) return true;
     const p = (model.provider || "").toLowerCase().replace(/[\s.-]/g, "");
-    const name = (model.name || "").toLowerCase();
-    const id = (model.id || "").toLowerCase();
-    if (p === "glm" || p === "zai" || p === "zhipu") return true;
-    if (/glm/.test(name) || /glm/.test(id)) return true;
-    return false;
+    if (p === "openai" || p === "anthropic" || p === "gemini") return false;
+    return true;
   };
   const loadCurrentModel = useCallback(async () => {
     try {
