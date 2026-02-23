@@ -211,6 +211,10 @@ export function useRepoSearch({ enabled = true }: UseRepoSearchOptions = {}): Us
         setDisplayedRepos(combined);
         setHasNextPage(hasNext);
       })
+      .catch((err) => {
+        console.error("Error loading more repositories:", err);
+        // Keep displayedRepos and hasNextPage unchanged on error
+      })
       .finally(() => setIsSearching(false));
   }, [hasNextPage, isSearching, searchInput]);
 

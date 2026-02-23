@@ -554,7 +554,7 @@ const Step1: React.FC<Step1Props> = ({ setProjectId, setChatStep }) => {
         Need help?
       </Link>
       <div className="flex items-center gap-4 mt-4">
-        {UserRepositorysLoading && !UserRepositorys && !repoOpen ? (
+        {UserRepositorysLoading && !UserRepositorys?.length && !repoOpen ? (
           <Skeleton className="flex-1 h-10" />
         ) : (
           <>
