@@ -916,12 +916,8 @@ export default function NewChatPage() {
     repoName?: string,
     branchName?: string
   ): Promise<boolean> => {
-    if (
-      !state.selectedAgent ||
-      (state.selectedAgent !== "ask" &&
-        state.selectedAgent !== "debug" &&
-        state.selectedAgent !== "code")
-    )
+    const chatAgents = ["ask", "debug", "spec_gen", "code"];
+    if (!state.selectedAgent || !chatAgents.includes(state.selectedAgent))
       return false;
     if (!user?.uid) {
       toast.error("Please sign in to continue");
