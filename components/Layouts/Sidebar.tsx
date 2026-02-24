@@ -16,7 +16,7 @@ import { planTypesEnum, SidebarItems } from "@/lib/Constants";
 import Image from "next/image";
 import Link from "next/link";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useAuthContext } from "@/contexts/AuthContext";
 import { usePathname, useRouter } from "next/navigation";
 import { useDispatch, useSelector } from "react-redux";
@@ -54,10 +54,7 @@ export function AppSidebar() {
   const [proModalOpen, setProModalOpen] = useState(false);
   const [isCheckingBackend, setIsCheckingBackend] = useState(false);
   const [isBackendAccessible, setIsBackendAccessible] = useState<boolean | null>(null);
-  const [progress, setProgress] = React.useState(90);
-  const supportPopoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null
-  );
+
   const { user } = useAuthContext();
   const pathname = usePathname().split("/").pop();
   const dispatch: AppDispatch = useDispatch();
